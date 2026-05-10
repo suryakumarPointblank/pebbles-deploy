@@ -16,6 +16,7 @@ docker run -d \
     --name pebbles-backend \
     --restart unless-stopped \
     -p 5000:5000 \
+    --network pebbles-network \
     --env-file /root/pebbles-deploy/.env \
     pebbles-backend:latest
 
