@@ -56,6 +56,8 @@ services:
       - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
       - signoz_user_scripts:/var/lib/clickhouse/user_scripts/
       - signoz_clickhouse_data:/var/lib/clickhouse/
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
     ulimits:
       nofile:
         soft: 262144
@@ -78,7 +80,7 @@ services:
     environment:
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
-      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=false
       - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
     entrypoint: ["/bin/sh"]
     command:
@@ -135,7 +137,7 @@ services:
       - LOW_CARDINAL_EXCEPTION_GROUPING=false
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
       - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
-      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=false
       - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
     ports:
       - "4317:4317"   # OTLP gRPC
