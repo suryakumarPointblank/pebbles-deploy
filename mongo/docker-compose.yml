@@ -1,0 +1,30 @@
+services:
+
+  mongodb:
+    build: .
+    container_name: pebbles-mongo
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME}
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - pebbles-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  pebbles-network:
+    name: pebbles-network
+    driver: bridge
+
+volumes:
+  mongo_data:

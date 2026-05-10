@@ -1,0 +1,47 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches:
+      - deploy-ferring
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: SSH into VM and redeploy backend
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT }}
+          script: |
+            set -e
+
+            cd ${{ secrets.VM_DEPLOY_PATH }}
+
+            echo "Pulling latest code..."
+            git pull origin deploy-ferring
+
+            echo "Building backend image..."
+            docker build -t pebbles-backend:latest .
+
+            echo "Stopping old backend container..."
+            docker stop pebbles-backend || true
+            docker rm pebbles-backend || true
+
+            echo "Starting new backend container..."
+            docker run -d \
+              --name pebbles-backend \
+              --restart unless-stopped \
+              --network pebbles-network \
+              -p 5000:5000 \
+              --env-file .env \
+              pebbles-backend:latest
+
+            echo "Cleaning up unused images..."
+            docker image prune -f
+
+            echo "Deploy complete."
