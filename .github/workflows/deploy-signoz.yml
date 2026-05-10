@@ -1,0 +1,37 @@
+name: Deploy SigNoz Observability Stack
+
+on:
+  workflow_dispatch:   # triggered manually from the GitHub Actions tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: SSH into VM and start SigNoz stack
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT }}
+          script: |
+            set -e
+
+            cd ${{ secrets.VM_DEPLOY_PATH }}
+
+            echo "Pulling latest code..."
+            git pull origin deploy-ferring
+
+            echo "Ensuring pebbles-network exists (created by mongo compose)..."
+            docker network inspect pebbles-network >/dev/null 2>&1 || \
+              docker network create pebbles-network
+
+            echo "Starting SigNoz stack..."
+            docker compose -f signoz/docker-compose.yml pull --quiet
+            docker compose -f signoz/docker-compose.yml up -d
+
+            echo "Cleaning up unused images..."
+            docker image prune -f
+
+            echo "SigNoz UI available at http://${{ secrets.VM_HOST }}:3301"
