@@ -1,109 +1,155 @@
-version: '3.8'
-
-# SigNoz observability stack
-# Start:   docker compose -f signoz/docker-compose.yml up -d
-# UI:      http://<your-server-ip>:3301
-# NOTE: Run mongo/docker-compose.yml at least once first so pebbles-network exists
-
 services:
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.1.5-alpine
-    container_name: signoz_clickhouse
-    hostname: clickhouse
-    environment:
-      CLICKHOUSE_DB: signoz_metrics
+  # Downloads the histogramQuantile binary needed by ClickHouse custom functions
+  init-clickhouse:
+    image: clickhouse/clickhouse-server:25.5.6
+    container_name: signoz-init-clickhouse
+    command:
+      - bash
+      - -c
+      - |
+        version="v0.0.1"
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        echo "Fetching histogram-binary for $${node_os}/$${node_arch}"
+        cd /tmp
+        wget -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        tar -xvzf histogram-quantile.tar.gz
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
+    restart: on-failure
     volumes:
-      - signoz_clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/listen_host.xml
+      - signoz_user_scripts:/var/lib/clickhouse/user_scripts/
+    networks:
+      - signoz_network
+
+  zookeeper-1:
+    image: signoz/zookeeper:3.7.1
+    container_name: signoz-zookeeper-1
+    user: root
+    environment:
+      - ZOO_SERVER_ID=1
+      - ALLOW_ANONYMOUS_LOGIN=yes
+      - ZOO_AUTOPURGE_INTERVAL=1
+    volumes:
+      - signoz_zookeeper:/bitnami/zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -m 2 http://localhost:8080/commands/ruok | grep error | grep null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - signoz_network
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.5.6
+    container_name: signoz-clickhouse
+    depends_on:
+      init-clickhouse:
+        condition: service_completed_successfully
+      zookeeper-1:
+        condition: service_healthy
+    volumes:
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.xml
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.xml
+      - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml
+      - signoz_user_scripts:/var/lib/clickhouse/user_scripts/
+      - signoz_clickhouse_data:/var/lib/clickhouse/
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
-    networks:
-      - signoz_network
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "127.0.0.1:8123/ping"]
+      test: ["CMD", "wget", "--spider", "-q", "0.0.0.0:8123/ping"]
       interval: 30s
       timeout: 5s
       retries: 5
+    networks:
+      - signoz_network
+    restart: unless-stopped
 
-  otel-collector-migrator:
-    image: signoz/signoz-schema-migrator:0.102.2
-    container_name: otel-migrator
-    command:
-      - "--dsn=tcp://clickhouse:9000"
-      - "--replication=false"
+  signoz-migrator:
+    image: signoz/signoz-otel-collector:v0.144.3
+    container_name: signoz-migrator
     depends_on:
       clickhouse:
         condition: service_healthy
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    restart: on-failure
     networks:
       - signoz_network
+
+  signoz:
+    image: signoz/signoz:v0.122.0
+    container_name: signoz
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "3301:8080"
+    volumes:
+      - signoz_sqlite:/var/lib/signoz/
+    environment:
+      - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
+      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
+      - SIGNOZ_TOKENIZER_JWT_SECRET=pebbles-signoz-secret
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - signoz_network
+    restart: unless-stopped
 
   otel-collector:
-    image: signoz/signoz-otel-collector:0.102.2
-    container_name: signoz_otel_collector
-    hostname: signoz-otel-collector
-    command: ["--config=/etc/otel-collector-config.yaml"]
+    image: signoz/signoz-otel-collector:v0.144.3
+    container_name: signoz-otel-collector
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml --manager-config=/etc/manager-config.yaml --copy-path=/var/tmp/collector-config.yaml
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
-    ports:
-      - "4317:4317"   # gRPC
-      - "4318:4318"   # HTTP — backend sends here
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    networks:
-      - signoz_network
-      - pebbles-network   # reachable by pebbles-backend container
-    restart: unless-stopped
-
-  query-service:
-    image: signoz/query-service:0.49.1
-    container_name: signoz_query_service
-    hostname: signoz-query-service
-    command: ["-config=/root/config/prometheus.yml"]
+      - ./otel-collector-opamp-config.yaml:/etc/manager-config.yaml
     environment:
-      ClickHouseUrl: tcp://clickhouse:9000
-      STORAGE: clickhouse
-      GODEBUG: netdns=go
-      TELEMETRY_ENABLED: "false"
-      DEPLOYMENT_TYPE: docker-standalone-amd
-    volumes:
-      - ./prometheus.yml:/root/config/prometheus.yml
-      - signoz_query_data:/var/lib/signoz
+      - OTEL_RESOURCE_ATTRIBUTES=host.name=signoz-host,os.type=linux
+      - LOW_CARDINAL_EXCEPTION_GROUPING=false
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
     ports:
-      - "8080:8080"
-    depends_on:
-      clickhouse:
-        condition: service_healthy
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
     networks:
       - signoz_network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "127.0.0.1:8080/api/v1/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
-  frontend:
-    image: signoz/frontend:0.49.1
-    container_name: signoz_frontend
-    volumes:
-      - ./signoz-nginx.conf:/etc/nginx/conf.d/default.conf
-    ports:
-      - "3301:3301"
-    depends_on:
-      query-service:
-        condition: service_healthy
-    networks:
-      - signoz_network
+      - pebbles-network
     restart: unless-stopped
 
 volumes:
   signoz_clickhouse_data:
-  signoz_query_data:
+  signoz_zookeeper:
+  signoz_sqlite:
+  signoz_user_scripts:
 
 networks:
   signoz_network:
